@@ -29,6 +29,29 @@ if [ "$(id -u)" -ne 0 ]; then
     sudo -v || { echo "Error: sudo authentication failed." >&2; exit 1; }
 fi
 
+# --- Configuration -----------------------------------------------------------
+
+# System user to create. Override with: TARGET_USER=foo ./base-install.sh
+TARGET_USER="${TARGET_USER:-chef}"
+
+# ctop version. Latest release: https://github.com/bcicen/ctop/releases
+CTOP_VERSION="${CTOP_VERSION:-0.7.7}"
+
+# Pinned commit of main-caddy-proxy for reproducible installs.
+# Update by checking https://github.com/jonaaix/main-caddy-proxy/commits/main
+CADDY_PROXY_COMMIT="${CADDY_PROXY_COMMIT:-282186022b75e20588f49cf45e79434df4cb00cc}"
+
+# --- Inputs ------------------------------------------------------------------
+
+read -rp "Email for Let's Encrypt certificate notifications: " USER_EMAIL
+if [ -z "$USER_EMAIL" ] || ! [[ "$USER_EMAIL" == *@*.* ]]; then
+    echo "Error: a valid email address is required for Caddy / Let's Encrypt." >&2
+    exit 1
+fi
+
+read -rp "GitHub username to import SSH public keys from (optional, press Enter to skip): " GITHUB_USER
+GITHUB_USER="${GITHUB_USER:-}"
+
 # --- Banner ------------------------------------------------------------------
 
 CYAN=$'\033[1;36m'
@@ -37,23 +60,32 @@ NC=$'\033[0m' #No Color
 cat <<EOF
 
 ${CYAN}=============================================================${NC}
-${YELLOW}Installation Steps:${NC}
+${YELLOW}Installation Plan:${NC}
 ${CYAN}=============================================================${NC}
-1. Create a new default user named 'chef'.
-2. Install and configure UFW.
-3. Update and upgrade all packages.
-4. Create a projects directory and set permissions.
-5. Install the z-jump script.
-6. Add bash aliases.
-7. Install Docker.
-8. Add Docker to UFW rules.
-9. Install the Docker main-caddy-proxy.
+  Target user      : $TARGET_USER
+  Caddy email      : $USER_EMAIL
+  SSH keys from GH : ${GITHUB_USER:-<none>}
+
+Steps:
+  1. Create system user '$TARGET_USER'
+  2. Install and configure UFW
+  3. Update and upgrade all packages
+  4. Create a projects directory
+  5. Install the z-jump script
+  6. Add bash aliases
+  7. Install Docker
+  8. Add Docker to UFW rules
+  9. Install main-caddy-proxy + docker-autoheal cron${GITHUB_USER:+
+ 10. Import SSH keys from github.com/$GITHUB_USER}
 
 ${CYAN}=============================================================${NC}
-The installation will begin in 5 seconds...
 EOF
 
-sleep 5
+read -rp "Continue? [y/N] " CONFIRM
+case "$CONFIRM" in
+    y|Y|yes|YES) ;;
+    *) echo "Aborted."; exit 1 ;;
+esac
 
 # Function to print log messages with timestamps
 log() {
@@ -71,7 +103,7 @@ print_green() {
 
 # Generate a random secure password for the new user
 PASSWORD=$(openssl rand -base64 16)
-USERNAME="chef"
+USERNAME="$TARGET_USER"
 
 # Step 1: User Creation
 log "Step 1: Creating a new default user."
@@ -87,10 +119,11 @@ fi
 
 # Install basics
 sudo apt-get update
-sudo apt-get install -y unzip htop btop micro nano git curl
+sudo apt-get install -y unzip htop btop micro nano git curl ssh-import-id
 
 # Install ctop
-ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && sudo wget "https://github.com/bcicen/ctop/releases/download/v0.7.7/ctop-0.7.7-linux-$ARCH" -O /usr/local/bin/ctop
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+sudo wget -q "https://github.com/bcicen/ctop/releases/download/v${CTOP_VERSION}/ctop-${CTOP_VERSION}-linux-${ARCH}" -O /usr/local/bin/ctop
 sudo chmod +x /usr/local/bin/ctop
 
 # Step 2: UFW
@@ -215,39 +248,66 @@ EOL
     sudo systemctl restart ufw
 fi
 
-# Step 9: Main Caddy Proxy
-log "Step 9: Installing Docker main-caddy-proxy."
+# Step 9: Main Caddy Proxy (pinned commit for reproducibility)
+log "Step 9: Installing Docker main-caddy-proxy at $CADDY_PROXY_COMMIT."
 
 if [ -d "/var/www/main-caddy-proxy" ]; then
-    rm -rf /var/www/main-caddy-proxy
+    sudo rm -rf /var/www/main-caddy-proxy
 fi
 
-cd /var/www && git clone --depth=1 --branch=main https://github.com/jonaaix/main-caddy-proxy.git
+cd /var/www
+sudo git clone https://github.com/jonaaix/main-caddy-proxy.git
+sudo git -C /var/www/main-caddy-proxy checkout "$CADDY_PROXY_COMMIT"
 sudo rm -rf /var/www/main-caddy-proxy/.git
 
 cd /var/www/main-caddy-proxy && docker network create main-proxy || true
 
-read -p "Enter your email for certificate notifications: " USER_EMAIL
-sudo sed -i "s/CADDY_DOCKER_EMAIL=[^ ]*/CADDY_DOCKER_EMAIL=$USER_EMAIL/" /var/www/main-caddy-proxy/compose.yaml
+sudo sed -i.bak "s/CADDY_DOCKER_EMAIL=[^ ]*/CADDY_DOCKER_EMAIL=$USER_EMAIL/" /var/www/main-caddy-proxy/compose.yaml
+sudo rm -f /var/www/main-caddy-proxy/compose.yaml.bak
 
 cd /var/www/main-caddy-proxy && docker compose up -d
+
+# Install docker-autoheal: restart unhealthy containers via cron (every minute)
+log "Installing docker-autoheal cron job."
+sudo tee /usr/local/bin/docker-autoheal.sh >/dev/null <<'AUTOHEAL'
+#!/bin/bash
+LOGFILE="/var/log/docker-autoheal.log"
+UNHEALTHY=$(docker ps --filter health=unhealthy --format '{{.Names}}')
+if [ -n "$UNHEALTHY" ]; then
+    for c in $UNHEALTHY; do
+        echo "$(date) - Restarting: $c" | tee -a "$LOGFILE"
+        docker restart "$c" >> "$LOGFILE" 2>&1
+    done
+fi
+AUTOHEAL
+sudo chmod +x /usr/local/bin/docker-autoheal.sh
+sudo touch /var/log/docker-autoheal.log
+echo "* * * * * root /usr/local/bin/docker-autoheal.sh" | sudo tee /etc/cron.d/docker-autoheal >/dev/null
+sudo chmod 644 /etc/cron.d/docker-autoheal
 
 log "Fixing permissions after git clone..."
 sudo chown -R www-data:www-data $PROJECTS_DIR
 sudo chmod -R 775 $PROJECTS_DIR
 
-# SSH Setup (Creating empty folder only)
-log "Add SSH base config"
-mkdir -p /home/$USERNAME/.ssh
-chmod 700 /home/$USERNAME/.ssh
-touch /home/$USERNAME/.ssh/authorized_keys
-chmod 600 /home/$USERNAME/.ssh/authorized_keys
-chown -R $USERNAME:$USERNAME /home/$USERNAME/.ssh
+# SSH Setup
+log "Setting up SSH directory for $USERNAME."
+sudo mkdir -p "/home/$USERNAME/.ssh"
+sudo chmod 700 "/home/$USERNAME/.ssh"
+sudo touch "/home/$USERNAME/.ssh/authorized_keys"
+sudo chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
+sudo chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.ssh"
+
+# Optional: import SSH public keys from a GitHub user
+if [ -n "$GITHUB_USER" ]; then
+    log "Importing SSH keys from github.com/$GITHUB_USER"
+    sudo -u "$USERNAME" ssh-import-id "gh:$GITHUB_USER" \
+        || echo "Warning: ssh-import-id failed for gh:$GITHUB_USER (continuing)." >&2
+fi
 
 # Add symlink
 if [ ! -L "/home/$USERNAME/www" ]; then
-    ln -s /var/www /home/$USERNAME/www
-    chown -h $USERNAME:$USERNAME /home/$USERNAME/www
+    sudo ln -s /var/www "/home/$USERNAME/www"
+    sudo chown -h "$USERNAME:$USERNAME" "/home/$USERNAME/www"
 fi
 
 log "Setup complete. Displaying credentials."
