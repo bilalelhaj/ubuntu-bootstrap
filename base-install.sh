@@ -1,6 +1,36 @@
 #!/bin/bash
+set -euo pipefail
 
-# Print installation steps
+# --- Pre-flight checks -------------------------------------------------------
+
+# OS check: this script targets Debian/Ubuntu (apt-based)
+if ! command -v apt-get >/dev/null 2>&1; then
+    echo "Error: apt-get not found. This script supports Debian/Ubuntu only." >&2
+    exit 1
+fi
+
+if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+        ubuntu|debian) ;;
+        *)
+            echo "Error: unsupported OS '${ID:-unknown}'. Tested on Ubuntu / Debian." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# Sudo check: prime credentials up-front so the run is non-interactive afterwards
+if [ "$(id -u)" -ne 0 ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo "Error: must run as root or have sudo installed." >&2
+        exit 1
+    fi
+    sudo -v || { echo "Error: sudo authentication failed." >&2; exit 1; }
+fi
+
+# --- Banner ------------------------------------------------------------------
+
 CYAN=$'\033[1;36m'
 YELLOW=$'\033[1;33m'
 NC=$'\033[0m' #No Color
@@ -11,14 +41,13 @@ ${YELLOW}Installation Steps:${NC}
 ${CYAN}=============================================================${NC}
 1. Create a new default user named 'chef'.
 2. Install and configure UFW.
-3. Permit root login via SSH.
-4. Update and upgrade all packages.
-5. Create a projects directory and set permissions.
-6. Install the z-jump script.
-7. Add bash aliases.
-8. Install Docker.
-9. Add Docker to UFW rules.
-10. Install the Docker main-caddy-proxy.
+3. Update and upgrade all packages.
+4. Create a projects directory and set permissions.
+5. Install the z-jump script.
+6. Add bash aliases.
+7. Install Docker.
+8. Add Docker to UFW rules.
+9. Install the Docker main-caddy-proxy.
 
 ${CYAN}=============================================================${NC}
 The installation will begin in 5 seconds...
@@ -76,20 +105,14 @@ sudo ufw route allow proto tcp from any to any port 443
 echo "y" | sudo ufw enable
 sudo ufw status
 
-# Step 3: SSH Config
-log "Step 3: Permitting root login via SSH."
-SSH_CONFIG_FILE="/etc/ssh/sshd_config"
-sudo sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' $SSH_CONFIG_FILE
-sudo systemctl restart ssh
-
-# Step 4: Updates
-log "Step 4: Updating and upgrading all packages."
+# Step 3: Updates
+log "Step 3: Updating and upgrading all packages."
 sudo apt-get update -y
 sudo apt-get upgrade -y
 sudo apt-get autoremove -y
 
-# Step 5: Projects Directory
-log "Step 5: Creating directory for projects."
+# Step 4: Projects Directory
+log "Step 4: Creating directory for projects."
 PROJECTS_DIR="/var/www"
 sudo usermod -aG www-data $USERNAME
 
@@ -106,15 +129,15 @@ sudo chmod -R 775 $PROJECTS_DIR
 
 sudo chmod g+s $PROJECTS_DIR
 
-# Step 6: z-jump
-log "Step 6: Installing z-jump script."
+# Step 5: z-jump
+log "Step 5: Installing z-jump script."
 Z_SCRIPT_PATH="/home/$USERNAME/z.sh"
 sudo wget https://raw.githubusercontent.com/rupa/z/master/z.sh -O $Z_SCRIPT_PATH
 sudo chown $USERNAME:$USERNAME $Z_SCRIPT_PATH
 sudo sh -c "echo . $Z_SCRIPT_PATH >> /home/$USERNAME/.bashrc"
 
-# Step 7: Aliases
-log "Step 7: Adding bash aliases."
+# Step 6: Aliases
+log "Step 6: Adding bash aliases."
 if ! grep -q "alias dc=" /home/"$USERNAME"/.bashrc; then
     sudo tee -a /home/"$USERNAME"/.bashrc >/dev/null <<'EOF'
 alias dc="docker compose"
@@ -123,12 +146,12 @@ alias sshkeygen-best="ssh-keygen -t ed25519 -a 100"
 EOF
 fi
 
-# Step 8: Installing Docker
-log "Step 8: Installing Docker."
+# Step 7: Installing Docker
+log "Step 7: Installing Docker."
 
-# Clean up broken install attempts
+# Clean up broken install attempts (ignore errors for packages that aren't installed)
 for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
-    sudo apt-get remove -y $pkg
+    sudo apt-get remove -y "$pkg" || true
 done
 
 # Use official get-docker script
@@ -155,8 +178,8 @@ sudo usermod -aG docker $USERNAME
 sudo systemctl enable docker.service
 sudo systemctl enable containerd.service
 
-# Step 9: UFW for Docker
-log "Step 9: Adding Docker to UFW rules."
+# Step 8: UFW for Docker
+log "Step 8: Adding Docker to UFW rules."
 DOCKER_UFW_RULES="/etc/ufw/after.rules"
 
 if ! grep -q "BEGIN UFW AND DOCKER" "$DOCKER_UFW_RULES"; then
@@ -192,8 +215,8 @@ EOL
     sudo systemctl restart ufw
 fi
 
-# Step 10: Main Caddy Proxy
-log "Step 10: Installing Docker main-caddy-proxy."
+# Step 9: Main Caddy Proxy
+log "Step 9: Installing Docker main-caddy-proxy."
 
 if [ -d "/var/www/main-caddy-proxy" ]; then
     rm -rf /var/www/main-caddy-proxy
