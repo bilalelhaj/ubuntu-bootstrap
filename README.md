@@ -37,6 +37,7 @@ The script prompts for:
 
 - An email for Let's Encrypt certificate notifications
 - *(Optional)* A GitHub username to import SSH public keys from
+- *(Optional)* A hostname for the server (e.g. `myacme-prod`); leave blank to keep the current one
 - A `y/N` confirmation that displays the full plan before any change is made
 
 ## Configuration

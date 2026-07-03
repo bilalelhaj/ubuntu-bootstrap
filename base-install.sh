@@ -52,6 +52,13 @@ fi
 read -rp "GitHub username to import SSH public keys from (optional, press Enter to skip): " GITHUB_USER
 GITHUB_USER="${GITHUB_USER:-}"
 
+read -rp "Hostname for this server (e.g. myacme-prod, optional, press Enter to keep current): " SERVER_HOSTNAME
+SERVER_HOSTNAME="${SERVER_HOSTNAME:-}"
+if [ -n "$SERVER_HOSTNAME" ] && ! [[ "$SERVER_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+    echo "Error: invalid hostname '$SERVER_HOSTNAME'. Use lowercase letters, digits and hyphens (max 63 chars, no leading/trailing hyphen)." >&2
+    exit 1
+fi
+
 # --- Banner ------------------------------------------------------------------
 
 CYAN=$'\033[1;36m'
@@ -63,6 +70,7 @@ ${CYAN}=============================================================${NC}
 ${YELLOW}Installation Plan:${NC}
 ${CYAN}=============================================================${NC}
   Target user      : $TARGET_USER
+  Hostname         : ${SERVER_HOSTNAME:-<unchanged>}
   Caddy email      : $USER_EMAIL
   SSH keys from GH : ${GITHUB_USER:-<none>}
 
@@ -104,6 +112,17 @@ print_green() {
 # Generate a random secure password for the new user
 PASSWORD=$(openssl rand -base64 16)
 USERNAME="$TARGET_USER"
+
+# Set hostname (optional; skipped when left blank)
+if [ -n "$SERVER_HOSTNAME" ]; then
+    log "Setting hostname to '$SERVER_HOSTNAME'."
+    sudo hostnamectl set-hostname "$SERVER_HOSTNAME"
+    if grep -q "^127.0.1.1" /etc/hosts; then
+        sudo sed -i "s/^127.0.1.1.*/127.0.1.1\t$SERVER_HOSTNAME/" /etc/hosts
+    else
+        printf '127.0.1.1\t%s\n' "$SERVER_HOSTNAME" | sudo tee -a /etc/hosts >/dev/null
+    fi
+fi
 
 # Step 1: User Creation
 log "Step 1: Creating a new default user."
@@ -173,6 +192,7 @@ sudo sh -c "echo . $Z_SCRIPT_PATH >> /home/$USERNAME/.bashrc"
 log "Step 6: Adding bash aliases."
 if ! grep -q "alias dc=" /home/"$USERNAME"/.bashrc; then
     sudo tee -a /home/"$USERNAME"/.bashrc >/dev/null <<'EOF'
+alias ll="ls -la"
 alias dc="docker compose"
 alias randpw="openssl rand -base64 32 | tr '+/=' '___'"
 alias sshkeygen-best="ssh-keygen -t ed25519 -a 100"
