@@ -54,6 +54,19 @@ Override defaults via environment variables:
 TARGET_USER=bilal ./base-install.sh
 ```
 
+## Re-running
+
+The script is idempotent — safe to run again on the same server. Every step
+either guards itself or is rewritten in place, so re-runs don't duplicate lines
+or clobber state:
+
+- The `.bashrc` z-jump + alias block is delimited by markers and regenerated on
+  every run, so aliases stay in sync and never accumulate duplicates.
+- The `chef` user, Docker install, and Caddy checkout are created only if
+  missing; the generated password is shown only on first creation.
+- To force a fresh pinned Caddy checkout, remove `/var/www/main-caddy-proxy`
+  before re-running.
+
 ## What it does NOT do
 
 - Does not modify `sshd_config` — the OS default stays in place

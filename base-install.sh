@@ -80,7 +80,7 @@ Steps:
   3. Update and upgrade all packages
   4. Create a projects directory
   5. Install the z-jump script
-  6. Add bash aliases
+  6. Add shell aliases (managed .bashrc block)
   7. Install Docker
   8. Add Docker to UFW rules
   9. Install main-caddy-proxy + docker-autoheal cron${GITHUB_USER:+
@@ -109,9 +109,10 @@ print_green() {
     echo -e "${GREEN}$1${NC}"
 }
 
-# Generate a random secure password for the new user
-PASSWORD=$(openssl rand -base64 16)
+# The user's password is generated only when the account is actually created
+# (see Step 1), so re-runs never print a password that was never applied.
 USERNAME="$TARGET_USER"
+PASSWORD=""
 
 # Set hostname (optional; skipped when left blank)
 if [ -n "$SERVER_HOSTNAME" ]; then
@@ -130,9 +131,10 @@ log "Step 1: Creating a new default user."
 if id "$USERNAME" &>/dev/null; then
     log "User $USERNAME already exists. Skipping creation."
 else
-    sudo adduser --disabled-password --gecos "" $USERNAME
+    PASSWORD=$(openssl rand -base64 16)
+    sudo adduser --disabled-password --gecos "" "$USERNAME"
     echo "$USERNAME:$PASSWORD" | sudo chpasswd
-    sudo usermod -aG sudo $USERNAME
+    sudo usermod -aG sudo "$USERNAME"
     log "User '$USERNAME' created."
 fi
 
@@ -184,33 +186,49 @@ sudo chmod g+s $PROJECTS_DIR
 # Step 5: z-jump
 log "Step 5: Installing z-jump script."
 Z_SCRIPT_PATH="/home/$USERNAME/z.sh"
-sudo wget https://raw.githubusercontent.com/rupa/z/master/z.sh -O $Z_SCRIPT_PATH
-sudo chown $USERNAME:$USERNAME $Z_SCRIPT_PATH
-sudo sh -c "echo . $Z_SCRIPT_PATH >> /home/$USERNAME/.bashrc"
+sudo wget -q https://raw.githubusercontent.com/rupa/z/master/z.sh -O "$Z_SCRIPT_PATH"
+sudo chown "$USERNAME:$USERNAME" "$Z_SCRIPT_PATH"
 
-# Step 6: Aliases
-log "Step 6: Adding bash aliases."
-if ! grep -q "alias dc=" /home/"$USERNAME"/.bashrc; then
-    sudo tee -a /home/"$USERNAME"/.bashrc >/dev/null <<'EOF'
+# Step 6: Shell customizations (z-jump + aliases) as an idempotent managed block.
+# The block is delimited by markers and rewritten on every run, so re-running
+# never duplicates lines and always reflects the latest aliases.
+log "Step 6: Writing managed .bashrc block (z-jump + aliases)."
+BASHRC="/home/$USERNAME/.bashrc"
+sudo touch "$BASHRC"
+# Remove a prior managed block, plus any legacy bare z-jump source line left by
+# older script versions that appended without markers.
+sudo sed -i \
+    -e '/^# BEGIN base-install bashrc$/,/^# END base-install bashrc$/d' \
+    -e "\|^\. $Z_SCRIPT_PATH\$|d" \
+    "$BASHRC"
+sudo tee -a "$BASHRC" >/dev/null <<EOF
+# BEGIN base-install bashrc
+# Managed by base-install.sh — regenerated on every run; edits inside are lost.
+. $Z_SCRIPT_PATH
 alias ll="ls -la"
 alias dc="docker compose"
 alias randpw="openssl rand -base64 32 | tr '+/=' '___'"
 alias sshkeygen-best="ssh-keygen -t ed25519 -a 100"
+# END base-install bashrc
 EOF
-fi
+sudo chown "$USERNAME:$USERNAME" "$BASHRC"
 
 # Step 7: Installing Docker
 log "Step 7: Installing Docker."
 
-# Clean up broken install attempts (ignore errors for packages that aren't installed)
-for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
-    sudo apt-get remove -y "$pkg" || true
-done
+if command -v docker >/dev/null 2>&1; then
+    log "Docker already installed — skipping installation."
+else
+    # Clean up broken install attempts (ignore errors for packages that aren't installed)
+    for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
+        sudo apt-get remove -y "$pkg" || true
+    done
 
-# Use official get-docker script
-curl -fsSL https://get.docker.com -o get-docker.sh
-sudo sh get-docker.sh
-rm get-docker.sh
+    # Use official get-docker script
+    curl -fsSL https://get.docker.com -o get-docker.sh
+    sudo sh get-docker.sh
+    rm get-docker.sh
+fi
 
 # Configure logging
 DOCKER_CONFIG_FILE="/etc/docker/daemon.json"
@@ -271,16 +289,18 @@ fi
 # Step 9: Main Caddy Proxy (pinned commit for reproducibility)
 log "Step 9: Installing Docker main-caddy-proxy at $CADDY_PROXY_COMMIT."
 
-if [ -d "/var/www/main-caddy-proxy" ]; then
-    sudo rm -rf /var/www/main-caddy-proxy
+# Clone only when missing so re-runs don't wipe an existing proxy checkout.
+# To force a fresh pinned checkout, remove /var/www/main-caddy-proxy first.
+if [ ! -d "/var/www/main-caddy-proxy" ]; then
+    cd /var/www
+    sudo git clone https://github.com/jonaaix/main-caddy-proxy.git
+    sudo git -C /var/www/main-caddy-proxy checkout "$CADDY_PROXY_COMMIT"
+    sudo rm -rf /var/www/main-caddy-proxy/.git
+else
+    log "main-caddy-proxy already present — keeping existing checkout."
 fi
 
-cd /var/www
-sudo git clone https://github.com/jonaaix/main-caddy-proxy.git
-sudo git -C /var/www/main-caddy-proxy checkout "$CADDY_PROXY_COMMIT"
-sudo rm -rf /var/www/main-caddy-proxy/.git
-
-cd /var/www/main-caddy-proxy && docker network create main-proxy || true
+docker network create main-proxy 2>/dev/null || true
 
 sudo sed -i.bak "s/CADDY_DOCKER_EMAIL=[^ ]*/CADDY_DOCKER_EMAIL=$USER_EMAIL/" /var/www/main-caddy-proxy/compose.yaml
 sudo rm -f /var/www/main-caddy-proxy/compose.yaml.bak
@@ -332,6 +352,10 @@ fi
 
 log "Setup complete. Displaying credentials."
 print_green "Username: $USERNAME"
-print_green "Password: $PASSWORD"
+if [ -n "$PASSWORD" ]; then
+    print_green "Password: $PASSWORD"
+else
+    print_green "Password: (unchanged — user already existed)"
+fi
 
 exit 0
