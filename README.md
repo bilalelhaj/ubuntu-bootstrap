@@ -37,7 +37,7 @@ The script prompts for:
 
 - An email for Let's Encrypt certificate notifications
 - *(Optional)* A GitHub username to import SSH public keys from
-- *(Optional)* A hostname for the server (e.g. `myacme-prod`); leave blank to keep the current one
+- *(Optional)* A hostname for the server — a short name (`business-prod`) or an FQDN (`business-prod.example.com`); leave blank to keep the current one. An FQDN is recommended if you plan to run mail or monitoring later, so `hostname -f` resolves correctly
 - A `y/N` confirmation that displays the full plan before any change is made
 
 ## Configuration

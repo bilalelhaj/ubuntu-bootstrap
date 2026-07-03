@@ -52,10 +52,10 @@ fi
 read -rp "GitHub username to import SSH public keys from (optional, press Enter to skip): " GITHUB_USER
 GITHUB_USER="${GITHUB_USER:-}"
 
-read -rp "Hostname for this server (e.g. myacme-prod, optional, press Enter to keep current): " SERVER_HOSTNAME
+read -rp "Hostname for this server — short name or FQDN, e.g. business-prod or business-prod.example.com (optional, press Enter to keep current): " SERVER_HOSTNAME
 SERVER_HOSTNAME="${SERVER_HOSTNAME:-}"
-if [ -n "$SERVER_HOSTNAME" ] && ! [[ "$SERVER_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
-    echo "Error: invalid hostname '$SERVER_HOSTNAME'. Use lowercase letters, digits and hyphens (max 63 chars, no leading/trailing hyphen)." >&2
+if [ -n "$SERVER_HOSTNAME" ] && ! [[ "$SERVER_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]]; then
+    echo "Error: invalid hostname '$SERVER_HOSTNAME'. Use lowercase letters, digits, hyphens and dots (each label max 63 chars, no leading/trailing hyphen)." >&2
     exit 1
 fi
 
@@ -114,14 +114,23 @@ print_green() {
 USERNAME="$TARGET_USER"
 PASSWORD=""
 
-# Set hostname (optional; skipped when left blank)
+# Set hostname (optional; skipped when left blank).
+# When an FQDN is given, the static hostname is set to the short (first) label
+# and the FQDN is recorded in /etc/hosts so `hostname -f` resolves correctly —
+# what mail servers (HELO) and monitoring agents expect.
 if [ -n "$SERVER_HOSTNAME" ]; then
-    log "Setting hostname to '$SERVER_HOSTNAME'."
-    sudo hostnamectl set-hostname "$SERVER_HOSTNAME"
-    if grep -q "^127.0.1.1" /etc/hosts; then
-        sudo sed -i "s/^127.0.1.1.*/127.0.1.1\t$SERVER_HOSTNAME/" /etc/hosts
+    SHORT_HOSTNAME="${SERVER_HOSTNAME%%.*}"
+    log "Setting hostname to '$SHORT_HOSTNAME' (FQDN: $SERVER_HOSTNAME)."
+    sudo hostnamectl set-hostname "$SHORT_HOSTNAME"
+    if [ "$SERVER_HOSTNAME" = "$SHORT_HOSTNAME" ]; then
+        HOSTS_ENTRY="$SHORT_HOSTNAME"
     else
-        printf '127.0.1.1\t%s\n' "$SERVER_HOSTNAME" | sudo tee -a /etc/hosts >/dev/null
+        HOSTS_ENTRY="$SERVER_HOSTNAME $SHORT_HOSTNAME"
+    fi
+    if grep -q "^127.0.1.1" /etc/hosts; then
+        sudo sed -i "s/^127.0.1.1.*/127.0.1.1\t$HOSTS_ENTRY/" /etc/hosts
+    else
+        printf '127.0.1.1\t%s\n' "$HOSTS_ENTRY" | sudo tee -a /etc/hosts >/dev/null
     fi
 fi
 
